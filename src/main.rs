@@ -138,11 +138,17 @@ struct Str {
 }
 
 fn pk(s: &str) -> Result<Pubkey> {
+    if s.trim().is_empty() {
+        return Err(anyhow!("Empty public key"));
+    }
     s.parse::<Pubkey>()
         .map_err(|_| anyhow!("Invalid public key format"))
 }
 
 fn kp(s: &str) -> Result<Keypair> {
+    if s.trim().is_empty() {
+        return Err(anyhow!("Empty secret key"));
+    }
     let b = s.from_base58()
         .map_err(|_| anyhow!("Invalid base58 secret key"))?;
     
@@ -158,6 +164,10 @@ fn ata(w: &Pubkey, m: &Pubkey) -> Pubkey {
     spl_associated_token_account::get_associated_token_address(w, m)
 }
 
+fn vs(s: &str) -> bool {
+    !s.trim().is_empty()
+}
+
 async fn gen() -> Result<impl Reply, Rejection> {
     let k = Keypair::new();
     let r = Kp {
@@ -169,6 +179,13 @@ async fn gen() -> Result<impl Reply, Rejection> {
 }
 
 async fn ct(req: Ct) -> Result<impl Reply, Rejection> {
+    if !vs(&req.mint_authority) {
+        return Ok(warp::reply::json(&R::<()>::err("Missing mint authority".to_string())));
+    }
+    if !vs(&req.mint) {
+        return Ok(warp::reply::json(&R::<()>::err("Missing mint address".to_string())));
+    }
+    
     let ma = match pk(&req.mint_authority) {
         Ok(p) => p,
         Err(_) => return Ok(warp::reply::json(&R::<()>::err("Invalid mint authority".to_string()))),
@@ -179,13 +196,20 @@ async fn ct(req: Ct) -> Result<impl Reply, Rejection> {
         Err(_) => return Ok(warp::reply::json(&R::<()>::err("Invalid mint address".to_string()))),
     };
     
-    let i = initialize_mint(
+    if ma == m {
+        return Ok(warp::reply::json(&R::<()>::err("Mint authority cannot be same as mint".to_string())));
+    }
+    
+    let i = match initialize_mint(
         &spl_token::id(),
         &m,
         &ma,
         Some(&ma),
         req.decimals,
-    ).unwrap();
+    ) {
+        Ok(inst) => inst,
+        Err(_) => return Ok(warp::reply::json(&R::<()>::err("Failed to create mint instruction".to_string()))),
+    };
     
     let a: Vec<Ai> = i.accounts.iter().map(|acc| Ai {
         pubkey: acc.pubkey.to_string(),
@@ -203,6 +227,19 @@ async fn ct(req: Ct) -> Result<impl Reply, Rejection> {
 }
 
 async fn mt(req: Mt) -> Result<impl Reply, Rejection> {
+    if !vs(&req.mint) {
+        return Ok(warp::reply::json(&R::<()>::err("Missing mint address".to_string())));
+    }
+    if !vs(&req.destination) {
+        return Ok(warp::reply::json(&R::<()>::err("Missing destination address".to_string())));
+    }
+    if !vs(&req.authority) {
+        return Ok(warp::reply::json(&R::<()>::err("Missing authority address".to_string())));
+    }
+    if req.amount == 0 {
+        return Ok(warp::reply::json(&R::<()>::err("Amount must be greater than 0".to_string())));
+    }
+    
     let m = match pk(&req.mint) {
         Ok(p) => p,
         Err(_) => return Ok(warp::reply::json(&R::<()>::err("Invalid mint address".to_string()))),
@@ -218,16 +255,23 @@ async fn mt(req: Mt) -> Result<impl Reply, Rejection> {
         Err(_) => return Ok(warp::reply::json(&R::<()>::err("Invalid authority address".to_string()))),
     };
     
+    if m == d || m == a || d == a {
+        return Ok(warp::reply::json(&R::<()>::err("Addresses must be different".to_string())));
+    }
+    
     let dt = ata(&d, &m);
     
-    let i = mint_to(
+    let i = match mint_to(
         &spl_token::id(),
         &m,
         &dt,
         &a,
         &[],
         req.amount,
-    ).unwrap();
+    ) {
+        Ok(inst) => inst,
+        Err(_) => return Ok(warp::reply::json(&R::<()>::err("Failed to create mint instruction".to_string()))),
+    };
     
     let ac: Vec<Ai> = i.accounts.iter().map(|acc| Ai {
         pubkey: acc.pubkey.to_string(),
@@ -245,7 +289,10 @@ async fn mt(req: Mt) -> Result<impl Reply, Rejection> {
 }
 
 async fn sm(req: Sm) -> Result<impl Reply, Rejection> {
-    if req.message.is_empty() || req.secret.is_empty() {
+    if req.message.trim().is_empty() {
+        return Ok(warp::reply::json(&R::<()>::err("Missing required fields".to_string())));
+    }
+    if req.secret.trim().is_empty() {
         return Ok(warp::reply::json(&R::<()>::err("Missing required fields".to_string())));
     }
     
@@ -255,6 +302,10 @@ async fn sm(req: Sm) -> Result<impl Reply, Rejection> {
     };
     
     let mb = req.message.as_bytes();
+    if mb.len() > 1024 {
+        return Ok(warp::reply::json(&R::<()>::err("Message too long".to_string())));
+    }
+    
     let sig = k.sign_message(mb);
     
     let r = Sr {
@@ -267,6 +318,16 @@ async fn sm(req: Sm) -> Result<impl Reply, Rejection> {
 }
 
 async fn vm(req: Vm) -> Result<impl Reply, Rejection> {
+    if req.message.trim().is_empty() {
+        return Ok(warp::reply::json(&R::<()>::err("Missing message".to_string())));
+    }
+    if req.signature.trim().is_empty() {
+        return Ok(warp::reply::json(&R::<()>::err("Missing signature".to_string())));
+    }
+    if req.pubkey.trim().is_empty() {
+        return Ok(warp::reply::json(&R::<()>::err("Missing public key".to_string())));
+    }
+    
     let p = match pk(&req.pubkey) {
         Ok(pk) => pk,
         Err(_) => return Ok(warp::reply::json(&R::<()>::err("Invalid public key".to_string()))),
@@ -276,6 +337,10 @@ async fn vm(req: Vm) -> Result<impl Reply, Rejection> {
         Ok(b) => b,
         Err(_) => return Ok(warp::reply::json(&R::<()>::err("Invalid signature format".to_string()))),
     };
+    
+    if sb.len() != 64 {
+        return Ok(warp::reply::json(&R::<()>::err("Invalid signature length".to_string())));
+    }
     
     let sig = match Signature::try_from(sb.as_slice()) {
         Ok(s) => s,
@@ -295,6 +360,16 @@ async fn vm(req: Vm) -> Result<impl Reply, Rejection> {
 }
 
 async fn ss(req: Ss) -> Result<impl Reply, Rejection> {
+    if !vs(&req.from) {
+        return Ok(warp::reply::json(&R::<()>::err("Missing from address".to_string())));
+    }
+    if !vs(&req.to) {
+        return Ok(warp::reply::json(&R::<()>::err("Missing to address".to_string())));
+    }
+    if req.lamports == 0 {
+        return Ok(warp::reply::json(&R::<()>::err("Amount must be greater than 0".to_string())));
+    }
+    
     let f = match pk(&req.from) {
         Ok(p) => p,
         Err(_) => return Ok(warp::reply::json(&R::<()>::err("Invalid from address".to_string()))),
@@ -305,8 +380,8 @@ async fn ss(req: Ss) -> Result<impl Reply, Rejection> {
         Err(_) => return Ok(warp::reply::json(&R::<()>::err("Invalid to address".to_string()))),
     };
     
-    if req.lamports == 0 {
-        return Ok(warp::reply::json(&R::<()>::err("Amount must be greater than 0".to_string())));
+    if f == t {
+        return Ok(warp::reply::json(&R::<()>::err("From and to addresses cannot be same".to_string())));
     }
     
     let i = system_instruction::transfer(&f, &t, req.lamports);
@@ -321,6 +396,19 @@ async fn ss(req: Ss) -> Result<impl Reply, Rejection> {
 }
 
 async fn st(req: St) -> Result<impl Reply, Rejection> {
+    if !vs(&req.destination) {
+        return Ok(warp::reply::json(&R::<()>::err("Missing destination address".to_string())));
+    }
+    if !vs(&req.mint) {
+        return Ok(warp::reply::json(&R::<()>::err("Missing mint address".to_string())));
+    }
+    if !vs(&req.owner) {
+        return Ok(warp::reply::json(&R::<()>::err("Missing owner address".to_string())));
+    }
+    if req.amount == 0 {
+        return Ok(warp::reply::json(&R::<()>::err("Amount must be greater than 0".to_string())));
+    }
+    
     let d = match pk(&req.destination) {
         Ok(p) => p,
         Err(_) => return Ok(warp::reply::json(&R::<()>::err("Invalid destination address".to_string()))),
@@ -336,21 +424,24 @@ async fn st(req: St) -> Result<impl Reply, Rejection> {
         Err(_) => return Ok(warp::reply::json(&R::<()>::err("Invalid owner address".to_string()))),
     };
     
-    if req.amount == 0 {
-        return Ok(warp::reply::json(&R::<()>::err("Amount must be greater than 0".to_string())));
+    if d == o {
+        return Ok(warp::reply::json(&R::<()>::err("Destination and owner cannot be same".to_string())));
     }
     
     let st = ata(&o, &m);
     let dt = ata(&d, &m);
     
-    let i = transfer(
+    let i = match transfer(
         &spl_token::id(),
         &st,
         &dt,
         &o,
         &[],
         req.amount,
-    ).unwrap();
+    ) {
+        Ok(inst) => inst,
+        Err(_) => return Ok(warp::reply::json(&R::<()>::err("Failed to create transfer instruction".to_string()))),
+    };
     
     let a: Vec<Tai> = i.accounts.iter().map(|acc| Tai {
         pubkey: acc.pubkey.to_string(),
